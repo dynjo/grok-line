@@ -1,0 +1,10 @@
+.DS_Store
+node_modules/
+.cache/
+.env
+storage.json
+names.json
+*.png
+settings.json
+allowlist
+*.log

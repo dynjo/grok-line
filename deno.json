@@ -1,0 +1,8 @@
+{
+  "imports": {
+    "@evex/linejs": "jsr:@evex/linejs@3.5.0",
+    "@std/cli": "jsr:@std/cli@^1.0.32",
+    "@types/qrcode": "npm:@types/qrcode@^1.5.6",
+    "qrcode": "npm:qrcode@1.5.4"
+  }
+}

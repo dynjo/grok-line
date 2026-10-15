@@ -1,0 +1,21 @@
+#!/bin/bash
+# grok-line — personal LINE account CLI (LINE protocol via linejs). Send is refused unless --force.
+set -u
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR=$(cd -P "$(dirname "$SOURCE")" && pwd)
+  SOURCE=$(readlink "$SOURCE")
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+ROOT=$(cd -P "$(dirname "$SOURCE")/.." && pwd)
+DENO=$(command -v deno || true)
+for c in /opt/homebrew/bin/deno /usr/local/bin/deno "$HOME/.deno/bin/deno"; do
+  [ -z "$DENO" ] && [ -x "$c" ] && DENO="$c"
+done
+[ -z "$DENO" ] && { echo "grok-line: deno not found (brew install deno)" >&2; exit 1; }
+exec "$DENO" run --quiet --no-prompt --config "$ROOT/deno.json" \
+  --allow-net --allow-env --allow-sys \
+  --allow-read="$HOME/.config/grok-line,$HOME/.cache/grok-line,$ROOT,/Applications/LINE.app/Contents/Info.plist" \
+  --allow-write="$HOME/.config/grok-line,$HOME/.cache/grok-line" \
+  --allow-run=open \
+  "$ROOT/src/main.ts" "$@"
