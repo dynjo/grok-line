@@ -54,7 +54,7 @@ export function writeSettings(s: Settings) {
 }
 
 // storage.json holds the auth token, refresh token, and E2EE private keys.
-// It never leaves this Mac and stays 0600.
+// It never leaves this computer and stays 0600.
 export function openStorage(): FileStorage {
   ensurePrivateDir(CONFIG_DIR);
   const storage = new FileStorage(STORAGE_PATH);

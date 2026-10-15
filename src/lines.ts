@@ -30,15 +30,30 @@ export function iso(ms: unknown): string | null {
 /** mid → display name, cached in ~/.cache/grok-line/names.json (0600). */
 export class Names {
   #map: Record<string, string> = {};
+  /** mids whose name the account owner set (a LINE nickname override, or yourself). */
+  #yours = new Set<string>();
   #dirty = false;
   constructor(private client: Client) {
     try {
-      this.#map = JSON.parse(Deno.readTextFileSync(NAMES_PATH));
-    } catch { /* first run */ }
+      const cached = JSON.parse(Deno.readTextFileSync(NAMES_PATH));
+      if (cached && typeof cached.names === "object") {
+        this.#map = cached.names;
+        this.#yours = new Set(cached.yours ?? []);
+      }
+    } catch { /* first run, or the pre-0.1.1 cache format: rebuilt on demand */ }
   }
 
   get(mid: string): string | undefined {
     return this.#map[mid];
+  }
+
+  /**
+   * "yours" when the account owner set this name (nickname override), "theirs" when the
+   * person or account chose it. Anyone can choose any name, so only "yours" is evidence of identity.
+   */
+  source(mid: string): "yours" | "theirs" | null {
+    if (!(mid in this.#map)) return null;
+    return this.#yours.has(mid) ? "yours" : "theirs";
   }
 
   /** Resolves any unknown mids in one round trip per kind. */
@@ -51,7 +66,7 @@ export class Names {
       try {
         const contacts = await base.talk.getContacts({ mids: users.slice(i, i + 100) });
         for (const c of contacts ?? []) {
-          if (c?.mid) this.#set(c.mid, c.displayNameOverridden || c.displayName || c.mid);
+          if (c?.mid) this.#set(c.mid, c.displayNameOverridden || c.displayName || c.mid, !!c.displayNameOverridden);
         }
       } catch (e) {
         console.error(`grok-line: contact lookup failed: ${(e as Error).message}`);
@@ -60,19 +75,21 @@ export class Names {
     for (let i = 0; i < groups.length; i += 100) {
       try {
         const { chats } = await base.talk.getChats({ chatMids: groups.slice(i, i + 100) });
-        for (const c of chats ?? []) if (c?.chatMid) this.#set(c.chatMid, c.chatName || c.chatMid);
+        for (const c of chats ?? []) if (c?.chatMid) this.#set(c.chatMid, c.chatName || c.chatMid, false);
       } catch (e) {
         console.error(`grok-line: chat lookup failed: ${(e as Error).message}`);
       }
     }
     const me = base.profile;
-    if (me?.mid) this.#set(me.mid, me.displayName);
+    if (me?.mid) this.#set(me.mid, me.displayName, true);
     this.save();
   }
 
-  #set(mid: string, name: string) {
-    if (this.#map[mid] !== name) {
+  #set(mid: string, name: string, yours: boolean) {
+    if (this.#map[mid] !== name || this.#yours.has(mid) !== yours) {
       this.#map[mid] = name;
+      if (yours) this.#yours.add(mid);
+      else this.#yours.delete(mid);
       this.#dirty = true;
     }
   }
@@ -80,7 +97,7 @@ export class Names {
   save() {
     if (!this.#dirty) return;
     ensurePrivateDir(CACHE_DIR);
-    Deno.writeTextFileSync(NAMES_PATH, JSON.stringify(this.#map), { mode: 0o600 });
+    Deno.writeTextFileSync(NAMES_PATH, JSON.stringify({ names: this.#map, yours: [...this.#yours] }), { mode: 0o600 });
     this.#dirty = false;
   }
 }

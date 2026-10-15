@@ -1,71 +1,148 @@
-# line-grok
+# grok-line
 
-`grok-line` lets Grok Bot use your personal LINE account from this Mac.
+A command-line client for your **personal LINE account**, built so an AI agent (Grok Bot, or any agent that can run shell commands) can read your chats and, with your approval, reply.
 
-It does not drive the LINE app or read its screen. It speaks LINE's own client protocol, the same one LINE for Mac uses: Apache Thrift over the LEGY gateway (`/api/v4/TalkService.do`), QR login through `SecondaryQrCodeLoginService`, and Letter Sealing E2EE. The protocol work comes from [linejs](https://github.com/evex-dev/linejs) (`jsr:@evex/linejs`, pinned to 3.5.0). This repo is the CLI and the safety rails around it.
+```bash
+grok-line unread
+grok-line recent --to "Ada" --limit 10
+grok-line send --to "Ada" --text "On my way" --dry-run
+```
+
+> [!WARNING]
+> This is an **unofficial client**. LINE does not endorse it, and LINE's terms of use forbid third-party clients. Accounts that look automated (bulk sends, identical messages to many chats, instant replies around the clock) can be restricted. Use it on your own account, keep the volume human, and accept that risk before you log in.
+
+## How it works
+
+`grok-line` is not the [LINE Messaging API](https://developers.line.biz/en/docs/messaging-api/), which only works for Official Accounts. It signs in to your own account as a secondary device, the same way LINE's desktop apps do, and speaks LINE's client protocol (Thrift over the LEGY gateway, with Letter Sealing end-to-end encryption).
+
+The protocol implementation is [linejs](https://github.com/evex-dev/linejs). This project is the CLI around it: login, name lookup, JSON output for agents, and guard rails for sending.
+
+Everything runs on your own computer. Your session and encryption keys stay in a local file, and the only network traffic is to LINE's servers.
+
+## Requirements
+
+- [Deno](https://deno.com) 2.x (`brew install deno` on macOS)
+- A LINE account on your phone, used to approve the login
+- Built and tested on macOS. It should run anywhere Deno runs, but other platforms are untested.
 
 ## Install
 
-Requires Deno 2.x (`brew install deno`).
+```bash
+git clone https://github.com/dynjo/grok-line.git
+cd grok-line
+ln -s "$PWD/bin/grok-line" ~/.local/bin/grok-line   # or anywhere on your PATH
+```
+
+Dependencies are pinned in `deno.lock` and download on first run.
+
+## Log in
 
 ```bash
-cd ~/Developer/line-grok
-ln -sf "$PWD/bin/grok-line" ~/.local/bin/grok-line
-grok-line login --force          # QR on screen, scan with your phone, enter the PIN
+grok-line login --force
+```
+
+1. A QR code appears in the terminal (and opens as an image on macOS).
+2. Scan it with the LINE app on your phone: Home tab → QR scanner.
+3. A PIN appears in the terminal. Enter it on your phone.
+
+Then check the session:
+
+```bash
 grok-line doctor
 ```
 
-## Commands
+### Pick a device slot first
+
+LINE allows one session per secondary-device type. Logging in here **signs out whatever is already using that slot**.
+
+| `--device` | Signs out |
+| --- | --- |
+| `DESKTOPMAC` (default) | LINE for Mac. On a Mac with LINE installed, `grok-line` reports that app's version. |
+| `DESKTOPWIN` | Likely the desktop app too (untested) |
+| `IOSIPAD` | LINE on an iPad |
+
+If you use LINE's desktop app and want to keep it, log in with a slot you don't use, for example `grok-line login --device IOSIPAD --force`.
+
+## Usage
 
 ```bash
-grok-line doctor [--json]
-grok-line chats [--query Q] [--unread] [--limit N] [--refresh] [--json]
-grok-line unread [--json]
-grok-line recent --to "Name" [--limit N] [--json]       # a person
-grok-line recent --chat c0123… [--limit N] [--json]     # any chat by mid
-grok-line send --to "Name" --text "hello" --dry-run
-grok-line send --to "Name" --text "hello" --force
-grok-line send --chat c0123… --text "hello" --force     # groups: exact mid only
-grok-line watch --json [--include-own]                  # JSONL, one message per line
-grok-line gaps
+grok-line doctor                                    # session check
+grok-line chats [--query Q] [--unread] [--limit N]  # recent conversations
+grok-line unread                                    # unread counts per chat
+grok-line recent --to "Ada" [--limit N]             # history with a friend
+grok-line recent --chat <mid> [--limit N]           # history of any chat, including groups
+grok-line send --to "Ada" --text "hi" --dry-run     # resolve the recipient, print its mid
+grok-line send --chat <mid> --text "hi" --force     # send to that exact mid
+grok-line watch [--include-own]                     # stream incoming messages
+grok-line gaps                                      # known limitations
 ```
 
-`watch --json` prints one line per message:
+Every command except `gaps` accepts `--json`. Run `grok-line --help` for the full list.
+
+Every LINE user, group, and room has a **mid**, an ID like `u1a2b…` (user), `c1a2b…` (group), or `r1a2b…` (room). `chats` lists them, and `--chat` accepts any of them.
+
+### Streaming messages to an agent
+
+`grok-line watch --json` prints one JSON object per message as it arrives:
 
 ```json
-{"type":"message","id":"…","chat":"u…","chat_type":"user","chat_name":"Ada","from":"u…","from_name":"Ada","own":false,"kind":"text","text":"hi","time":"2026-10-15T13:04:48.027Z"}
+{"type":"message","id":"…","chat":"u…","chat_type":"user","chat_name":"Ada","from":"u…","from_name":"Ada","own":false,"kind":"text","text":"Are you coming?","time":"2026-10-15T13:04:48.027Z"}
 ```
 
-`chat` is the conversation: the group mid, or the other person's mid in a 1:1. Pass it straight to `recent --chat` or `send --chat`.
+`chat` is the conversation to reply into: the group's mid, or the other person's mid in a 1:1 chat. Messages that can't be decrypted carry a `decrypt_error` field instead of text.
 
-## Hard rules
+## Sending safely
 
-- Never send without the user's approval of the recipient and the exact text. `--force` is the only send path. `--dry-run` never sends.
-- `--to` is a person only. It refuses group names and group mids. Groups need `--chat` with the exact mid, and only after the user named that group.
-- `--to` searches friends first. Strangers and official accounts only match on their exact name, and only when no friend matches. The dry run and `--json` result say `friend: false` for them. Display names are chosen by their owners, so confirm the mid.
-- If `~/.config/grok-line/allowlist` exists, every target must be listed by mid (one `u…`/`c…`/`r…` per line; names are ignored because anyone can pick any name). A file with no mids, or one that can't be read, blocks every send.
-- Human-readable output strips terminal control sequences from message text and names. `--json` output is plain JSON.
-- Nothing marks chats read and no read receipts are sent.
+Sending is a two-step process, so that a person approves every message before it goes out:
 
-## Device slot
+1. **Dry run.** `send --to "Ada" --text "…" --dry-run` finds the recipient and prints the name, mid, whether they're a friend, and whether the message will be encrypted. Nothing is sent.
+2. **Send.** After you approve, `send --chat <that mid> --text "…" --force`.
 
-The session logs in as a secondary device. The default is `DESKTOPMAC`, using the installed LINE for Mac version. LINE allows one desktop session, so **logging in here logs out LINE for Mac** (and logging LINE for Mac back in logs this out). To keep the Mac app, log in under another slot instead, e.g. `grok-line login --device IOSIPAD --force`, which in turn takes the iPad slot.
+`--force` only accepts an exact mid, never a name. The recipient you approved is the one that gets the message, even if someone renames themselves in between.
 
-## Files
+More rules:
 
-| Path | What |
+- **Names can be faked.** People choose their own display names. `--to` searches your friends first. Nicknames you set yourself win over names people chose. Non-friends (strangers, business accounts) only match an exact name, and come back flagged `friend: false`.
+- **No accidental group messages.** `--to` only matches people. A group needs `--chat` with its mid.
+- **Optional allowlist.** If `~/.config/grok-line/allowlist` exists, only the mids listed there (one per line) can receive messages. Names in the file are ignored. A file with no mids, or one that can't be read, blocks every send.
+- **No read receipts.** Nothing marks chats as read.
+- **Encryption.** Messages are end-to-end encrypted whenever the recipient supports it. Official/business accounts don't, so messages to them go as normal LINE text, as with LINE's own apps.
+
+## Using it with an AI agent
+
+[`SKILL.md`](./SKILL.md) is a ready-made skill for agents that support the `SKILL.md` format (Grok, Claude Code, Cursor and others). It tells the agent which commands to use, to get your approval before every send, and how to handle each error. Install it however your agent loads skills, for example:
+
+```bash
+mkdir -p ~/.grok/skills/grok-line && ln -s "$PWD/SKILL.md" ~/.grok/skills/grok-line/SKILL.md
+```
+
+For a hosted agent like Grok Bot, ask it to install the skill from this repo's `SKILL.md`. The agent has to be able to run `grok-line` on the computer where you logged in.
+
+## Your data
+
+| Path | Contents |
 | --- | --- |
-| `~/.config/grok-line/storage.json` | Auth token, refresh token, E2EE private keys. `0600`. Treat it as a password. |
-| `~/.config/grok-line/settings.json` | Device type and optional app version override. |
-| `~/.config/grok-line/allowlist` | Optional send allowlist. |
-| `~/.cache/grok-line/names.json` | mid → display name cache. `0600`. |
+| `~/.config/grok-line/storage.json` | Login token, refresh token, end-to-end encryption private keys. Created `0600`. **Treat it like a password.** |
+| `~/.config/grok-line/settings.json` | Device slot and optional app-version override |
+| `~/.config/grok-line/allowlist` | Optional send allowlist |
+| `~/.cache/grok-line/names.json` | Cache of mid → display name |
 
-Nothing leaves the Mac except the traffic to LINE's own servers. Do not commit or copy `storage.json`.
+Set `GROK_LINE_CONFIG` to use a different config directory. To log out, delete `storage.json`, then remove the device from the logged-in devices list in your phone's LINE account settings.
 
-`grok-line` runs under Deno's permission sandbox: network, plus read/write limited to the two directories above (and reading LINE.app's `Info.plist` for the version).
+`grok-line` runs inside Deno's permission sandbox: network access, plus file access limited to the directories above.
 
-## Risks
+## Limitations
 
-LINE does not endorse this, and its terms forbid unofficial clients. Accounts get restricted for spam-like behaviour (bulk sends, identical messages to many chats, machine-speed replies), so keep the bot's volume and pacing human. Protocol changes on LINE's side can break login until linejs catches up. Bump the pinned version in `deno.json` when that happens.
+- Text only: no stickers, images, files, reactions, edits, or unsending yet.
+- Messages sent before you logged in may not decrypt, because the encryption keys come from the login.
+- OpenChat (Square) and calls aren't covered.
+- If LINE changes its protocol, login can break until linejs catches up. Update the pinned version in `deno.json`.
 
-Messages from before the login may not decrypt (`decrypt_error`). E2EE keys come from the QR login.
+`grok-line gaps` prints the current list.
+
+## Credits
+
+- [linejs](https://github.com/evex-dev/linejs) by Evex Developers: the LINE protocol, E2EE and login
+- [CHRLINE](https://github.com/DeachSword/CHRLINE): earlier protocol research that linejs builds on
+
+Not affiliated with LY Corporation (LINE) or xAI (Grok).

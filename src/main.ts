@@ -20,7 +20,7 @@ import {
 } from "./session.ts";
 import { decrypt, iso, midKind, Names, num, shape, type ShapedMessage } from "./lines.ts";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 const TOOL = "grok-line";
 const MAX_TEXT = 5000;
 const DEVICES: Device[] = ["DESKTOPMAC", "DESKTOPWIN", "IOSIPAD", "ANDROIDSECONDARY", "WATCHOS", "WEAROS"];
@@ -32,7 +32,8 @@ const GAPS = [
   "send encrypts (Letter Sealing E2EE) whenever the recipient has a key. Official/business accounts have none, so messages to them go as normal unencrypted LINE text, as LINE for Mac does. The dry run and the --json result say which (encrypted: true/false).",
   "send is plain text only. No stickers, images, files, reactions, unsend, or edits yet. Text is capped at 5000 characters.",
   "send --to is a person only (a friend or 1:1 chat name, or a u… mid). It never targets a group. Groups need --chat with the exact c… mid, after the user named that group.",
-  "send --to searches friends first. Non-friends (strangers, official accounts) match on an exact name only, and only when no friend matches; the result has friend: false. Display names are chosen by their owners, so always confirm the mid.",
+  "send --force only takes an exact mid (--chat, or --to u…). Names are for --dry-run: the dry run prints the mid, and that mid is what gets sent after approval, so a rename between approval and send cannot change the recipient.",
+  "send --to searches friends first. An exact match on a nickname you set wins over names people chose themselves. Non-friends (strangers, official accounts) match on an exact name only, and only when no friend matches; the result has friend: false. Display names are chosen by their owners, so always confirm the mid.",
   "An optional allowlist (~/.config/grok-line/allowlist) restricts send targets when it exists. One mid per line (names are ignored, since anyone can pick any name). A file with no mids, or one that cannot be read, blocks every send.",
   "OpenChat (Square) is not covered. Calls are not covered.",
   "watch does not mark anything read. Read receipts are never sent by this CLI.",
@@ -207,6 +208,8 @@ function loose(name: string): string {
 interface Target {
   mid: string;
   name: string | null;
+  /** "yours" = a nickname the account owner set; "theirs" = self-chosen by that account. */
+  name_source: "yours" | "theirs" | null;
   /** In the friend list. null when the friend list could not be read. */
   friend: boolean | null;
 }
@@ -219,7 +222,7 @@ interface Target {
  * only appear as 1:1 chats (strangers, official accounts) match on an exact name
  * only, and only when no friend matches. The result says whether it is a friend.
  */
-async function resolveTarget(client: Client, names: Names, flags: Flags): Promise<Target> {
+async function resolveTarget(client: Client, names: Names, flags: Flags, fresh = false): Promise<Target> {
   if (flags.to && flags.chat) throw new CliError("bad_target", "Pass --to or --chat, not both.");
   let friends: Set<string> | null = null;
   try {
@@ -231,8 +234,13 @@ async function resolveTarget(client: Client, names: Names, flags: Flags): Promis
   const explicit = flags.chat?.trim() ?? (/^u[0-9a-f]{32}$/.test(flags.to?.trim() ?? "") ? flags.to!.trim() : undefined);
   if (explicit !== undefined) {
     if (midKind(explicit) === "unknown") throw new CliError("bad_target", `Not a LINE mid: ${explicit}`);
-    await names.resolve([explicit]);
-    return { mid: explicit, name: names.get(explicit) ?? null, friend: midKind(explicit) === "user" ? isFriend(explicit) : null };
+    await names.resolve([explicit], fresh);
+    return {
+      mid: explicit,
+      name: names.get(explicit) ?? null,
+      name_source: names.source(explicit),
+      friend: midKind(explicit) === "user" ? isFriend(explicit) : null,
+    };
   }
   if (!flags.to) throw new CliError("bad_target", "Pass --to NAME or --chat MID.");
   const want = flags.to.trim();
@@ -241,15 +249,20 @@ async function resolveTarget(client: Client, names: Names, flags: Flags): Promis
   }
   const boxes = await messageBoxes(client, { limit: 100 });
   const chatPeople = boxes.map((b) => b.id as string).filter((m) => midKind(m) === "user");
-  await names.resolve([...chatPeople, ...(friends ?? [])]);
+  // Names can change at any time; a send re-reads them rather than trusting the cache.
+  await names.resolve([...chatPeople, ...(friends ?? [])], fresh);
   const key = loose(want);
   if (!key) throw new CliError("bad_target", "--to needs a name with letters or digits.");
-  const asPerson = (mid: string): Target => ({ mid, name: names.get(mid) ?? null, friend: isFriend(mid) });
+  const asPerson = (mid: string): Target => ({ mid, name: names.get(mid) ?? null, name_source: names.source(mid), friend: isFriend(mid) });
   const named = (mid: string) => loose(names.get(mid) ?? "");
 
   const friendList = [...(friends ?? [])];
   const strangers = chatPeople.filter((m) => !friends?.has(m));
+  const yours = (m: string) => names.source(m) === "yours";
   const tiers: string[][] = [
+    // An exact match on a nickname you set wins. Otherwise every exact friend match
+    // competes, so a friend who renames themselves to match is reported as ambiguous.
+    friendList.filter((m) => yours(m) && named(m) === key),
     friendList.filter((m) => named(m) === key),
     friendList.filter((m) => named(m).includes(key)),
     strangers.filter((m) => named(m) === key),
@@ -258,7 +271,7 @@ async function resolveTarget(client: Client, names: Names, flags: Flags): Promis
     if (hits.length === 1) return asPerson(hits[0]);
     if (hits.length > 1) {
       throw new CliError("ambiguous", `"${want}" matches ${hits.length} people:\n` +
-        hits.map((m) => `  ${names.get(m) ?? "?"}  ${m}${isFriend(m) === false ? "  (not a friend)" : ""}`).join("\n"), 2);
+        hits.map((m) => `  ${names.get(m) ?? "?"}  ${m}  (${yours(m) ? "your name for them" : "self-chosen name"}${isFriend(m) === false ? ", not a friend" : ""})`).join("\n"), 2);
     }
   }
   const groupHit = boxes.some((b) => midKind(b.id) !== "user" && named(b.id) === key);
@@ -330,20 +343,43 @@ async function cmdSend(flags: Flags) {
   const text = flags.text;
   if (!text || !text.trim()) throw new CliError("empty_text", "Pass --text with the exact message.");
   if (text.length > MAX_TEXT) throw new CliError("text_too_long", `Text is ${text.length} chars; cap is ${MAX_TEXT}.`);
+  const sending = flags.force && !flags["dry-run"];
+  const toMid = /^u[0-9a-f]{32}$/.test(flags.to?.trim() ?? "");
+  if (sending && flags.to && !toMid) {
+    // A name is looked up again on every call, and display names can change between the
+    // dry run and the send. Sending only to an exact mid means the approved recipient is
+    // the one that gets the message.
+    throw new CliError(
+      "needs_mid",
+      "--force needs the exact recipient mid. Run the --dry-run first, get the user's approval, then send with --chat <mid from the dry run>.",
+      4,
+    );
+  }
   const client = await connect();
   const names = new Names(client);
-  const target = await resolveTarget(client, names, flags);
+  const target = await resolveTarget(client, names, flags, true);
   const allow = readAllowlist();
   if (allow && !allow.has(target.mid)) {
     throw new CliError("not_allowlisted", `${target.name ?? "?"} (${target.mid}) is not in ${ALLOWLIST_PATH}.`, 4);
   }
   const encrypted = await supportsE2EE(client, target.mid);
-  const plan = { to: target.mid, name: target.name, type: midKind(target.mid), friend: target.friend, encrypted, text };
+  const plan = {
+    to: target.mid,
+    name: target.name,
+    name_source: target.name_source,
+    type: midKind(target.mid),
+    friend: target.friend,
+    encrypted,
+    text,
+  };
   if (flags["dry-run"] || !flags.force) {
     out(flags, { sent: false, dry_run: true, ...plan }, () => {
-      const who = target.friend === false ? "NOT A FRIEND — name is self-chosen, check the mid" : plan.type;
-      say(`Dry run. Would send to ${target.name ?? "?"} (${who}, ${target.mid}, ${encrypted ? "E2EE" : "plain text, no E2EE key"}):\n${text}`);
-      if (!flags.force) say("\nNothing sent. Rerun with --force after the user approves the recipient and exact text.");
+      const warn = target.friend === false
+        ? "NOT A FRIEND, name chosen by that account"
+        : target.name_source === "theirs" ? "name chosen by that account" : "your name for them";
+      say(`Dry run. Would send to ${target.name ?? "?"} (${plan.type}, ${warn}, ${encrypted ? "E2EE" : "plain text, no E2EE key"})`);
+      say(`  mid: ${target.mid}\n${text}`);
+      say(`\nNothing sent. After the user approves this recipient and exact text:\n  grok-line send --chat ${target.mid} --text <same text> --force`);
     });
     return;
   }

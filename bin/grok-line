@@ -13,9 +13,10 @@ for c in /opt/homebrew/bin/deno /usr/local/bin/deno "$HOME/.deno/bin/deno"; do
   [ -z "$DENO" ] && [ -x "$c" ] && DENO="$c"
 done
 [ -z "$DENO" ] && { echo "grok-line: deno not found (brew install deno)" >&2; exit 1; }
+CONFIG="${GROK_LINE_CONFIG:-$HOME/.config/grok-line}"
 exec "$DENO" run --quiet --no-prompt --config "$ROOT/deno.json" \
   --allow-net --allow-env --allow-sys \
-  --allow-read="$HOME/.config/grok-line,$HOME/.cache/grok-line,$ROOT,/Applications/LINE.app/Contents/Info.plist" \
-  --allow-write="$HOME/.config/grok-line,$HOME/.cache/grok-line" \
+  --allow-read="$CONFIG,$HOME/.cache/grok-line,$ROOT,/Applications/LINE.app/Contents/Info.plist" \
+  --allow-write="$CONFIG,$HOME/.cache/grok-line" \
   --allow-run=open \
   "$ROOT/src/main.ts" "$@"
