@@ -61,6 +61,16 @@ function clean(text: string): string {
     .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "\uFFFD");
 }
 
+/**
+ * A display name as one quoted, bounded line. Names are chosen by their owners, so a
+ * name with line breaks could otherwise print fake rows (e.g. a forged "mid:" line).
+ */
+function label(name: string | null | undefined): string {
+  if (!name) return "?";
+  const flat = clean(name).replace(/[\r\n\t\u0085\u2028\u2029\uFFFD]+/g, " ").trim();
+  return JSON.stringify(flat.length > 64 ? flat.slice(0, 63) + "…" : flat);
+}
+
 function say(text: string) {
   console.log(clean(text));
 }
@@ -114,7 +124,7 @@ async function cmdLogin(flags: Flags) {
   try { Deno.removeSync(qrPng); } catch { /* already gone */ }
   const me = base.profile;
   out(flags, { device, mid: me?.mid, name: me?.displayName }, () => {
-    say(`Logged in as ${me?.displayName} (${device}). Session saved to ${STORAGE_PATH} (0600).`);
+    say(`Logged in as ${label(me?.displayName)} (${device}). Session saved to ${STORAGE_PATH} (0600).`);
   });
 }
 
@@ -181,7 +191,7 @@ async function cmdChats(flags: Flags) {
   out(flags, { chats: rows }, () => {
     for (const r of rows) {
       const unread = r.unread ? ` (${r.unread} unread)` : "";
-      say(`${local(r.last_time)}  ${r.type.padEnd(5)}  ${r.name ?? "?"}${unread}  ${r.chat}`);
+      say(`${local(r.last_time)}  ${r.type.padEnd(5)}  ${r.chat}  ${label(r.name)}${unread}`);
     }
     if (!rows.length) say("No chats.");
   });
@@ -196,7 +206,7 @@ async function cmdUnread(flags: Flags) {
   const total = rows.reduce((s, r) => s + r.unread, 0);
   out(flags, { total, chats: rows }, () => {
     say(`${total} unread in ${rows.length} chat(s)`);
-    for (const r of rows) say(`  ${String(r.unread).padStart(4)}  ${r.type.padEnd(5)}  ${r.name ?? "?"}  ${r.chat}`);
+    for (const r of rows) say(`  ${String(r.unread).padStart(4)}  ${r.type.padEnd(5)}  ${r.chat}  ${label(r.name)}`);
   });
 }
 
@@ -271,7 +281,7 @@ async function resolveTarget(client: Client, names: Names, flags: Flags, fresh =
     if (hits.length === 1) return asPerson(hits[0]);
     if (hits.length > 1) {
       throw new CliError("ambiguous", `"${want}" matches ${hits.length} people:\n` +
-        hits.map((m) => `  ${names.get(m) ?? "?"}  ${m}  (${yours(m) ? "your name for them" : "self-chosen name"}${isFriend(m) === false ? ", not a friend" : ""})`).join("\n"), 2);
+        hits.map((m) => `  ${m}  ${label(names.get(m))}  (${yours(m) ? "your name for them" : "self-chosen name"}${isFriend(m) === false ? ", not a friend" : ""})`).join("\n"), 2);
     }
   }
   const groupHit = boxes.some((b) => midKind(b.id) !== "user" && named(b.id) === key);
@@ -310,7 +320,8 @@ function local(isoTime: string | null): string {
 
 function printMessages(msgs: ShapedMessage[]) {
   for (const m of msgs) {
-    const who = m.own ? "me" : (m.from_name ?? m.from.slice(0, 9));
+    let who = m.own ? "me" : label(m.from_name ?? m.from.slice(0, 9));
+    if (m.chat_type !== "user") who += ` in ${label(m.chat_name)}`;
     const body = m.decrypt_error ? `[could not decrypt: ${m.decrypt_error}]` : m.kind === "text" ? m.text : `[${m.kind}] ${m.text ?? ""}`;
     say(`${local(m.time)}  ${who}: ${(body ?? "").replaceAll("\n", "\n      ")}`);
   }
@@ -360,7 +371,7 @@ async function cmdSend(flags: Flags) {
   const target = await resolveTarget(client, names, flags, true);
   const allow = readAllowlist();
   if (allow && !allow.has(target.mid)) {
-    throw new CliError("not_allowlisted", `${target.name ?? "?"} (${target.mid}) is not in ${ALLOWLIST_PATH}.`, 4);
+    throw new CliError("not_allowlisted", `${target.mid} ${label(target.name)} is not in ${ALLOWLIST_PATH}.`, 4);
   }
   const encrypted = await supportsE2EE(client, target.mid);
   const plan = {
@@ -377,15 +388,20 @@ async function cmdSend(flags: Flags) {
       const warn = target.friend === false
         ? "NOT A FRIEND, name chosen by that account"
         : target.name_source === "theirs" ? "name chosen by that account" : "your name for them";
-      say(`Dry run. Would send to ${target.name ?? "?"} (${plan.type}, ${warn}, ${encrypted ? "E2EE" : "plain text, no E2EE key"})`);
-      say(`  mid: ${target.mid}\n${text}`);
-      say(`\nNothing sent. After the user approves this recipient and exact text:\n  grok-line send --chat ${target.mid} --text <same text> --force`);
+      // The mid comes first and the self-chosen name is quoted on one line, so a name
+      // cannot pose as part of this block.
+      say(`Dry run. Nothing sent.`);
+      say(`  mid:   ${target.mid}`);
+      say(`  name:  ${label(target.name)} (${plan.type}, ${warn})`);
+      say(`  mode:  ${encrypted ? "E2EE" : "plain text, no E2EE key"}`);
+      say(`  text:\n${text}`);
+      say(`\nAfter the user approves this recipient and exact text:\n  grok-line send --chat ${target.mid} --text <same text> --force`);
     });
     return;
   }
   const sent = await client.base.talk.sendMessage({ to: target.mid, text, e2ee: encrypted });
   out(flags, { sent: true, id: String(sent?.id ?? ""), ...plan }, () => {
-    say(`Sent to ${target.name ?? target.mid}${encrypted ? "" : " (not end-to-end encrypted: recipient has no Letter Sealing key)"}.`);
+    say(`Sent to ${target.mid} ${label(target.name)}${encrypted ? "" : " (not end-to-end encrypted: recipient has no Letter Sealing key)"}.`);
   });
 }
 
@@ -413,7 +429,7 @@ async function cmdWatch(flags: Flags) {
   const ac = new AbortController();
   Deno.addSignalListener("SIGINT", () => ac.abort());
   Deno.addSignalListener("SIGTERM", () => ac.abort());
-  if (!flags.json) console.error(`Watching as ${client.base.profile!.displayName}. Ctrl-C to stop.`);
+  if (!flags.json) console.error(`Watching as ${label(client.base.profile!.displayName)}. Ctrl-C to stop.`);
   // LEGY push stream, the same long-lived channel the desktop app keeps open.
   ac.signal.addEventListener("abort", () => client.base.push.opStream.close());
   const stream = client.base.createPolling().listenTalkEvents();
@@ -424,7 +440,7 @@ async function cmdWatch(flags: Flags) {
     await names.resolve([msg.from, msg.to]);
     const m = shape(msg, myMid, names, error);
     if (flags.json) console.log(JSON.stringify({ type: "message", ...m }));
-    else printMessages([{ ...m, from_name: m.chat_type === "user" ? m.from_name : `${m.from_name ?? "?"} @ ${m.chat_name ?? "?"}` }]);
+    else printMessages([m]);
   }
 }
 
